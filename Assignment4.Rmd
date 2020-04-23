@@ -1,0 +1,386 @@
+---
+title: "Assignment 4 - Applying meta-analytic priors"
+author: "Group 6: Nanna, Helene, Katrine, Bianka R and Stine F.H."
+output: 
+  md_document:
+    variant: markdown_github
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Assignment 4
+
+In this assignment we do the following:
+- we run a Bayesian meta-analysis of pitch variability in ASD, based on previously published literature
+- we analyze pitch variability in ASD in two new studies using both a conservative and a meta-analytic prior
+- we assess the difference in model quality and estimates using the two priors.
+
+The questions you need to answer are: What are the consequences of using a meta-analytic prior? Evaluate the models with conservative and meta-analytic priors. Discuss the effects on estimates. Discuss the effects on model quality. Discuss the role that meta-analytic priors should have in scientific practice. Should we systematically use them? Do they have drawbacks? Should we use them to complement more conservative approaches? How does the use of meta-analytic priors you suggest reflect the skeptical and cumulative nature of science?
+
+```{r Setup, include=FALSE}
+setwd("~/Dropbox/Computational modeling for cognitive science/Assignments/Assignment 4/4sem_ass4")
+
+library(pacman, tidyverse)
+library(brms)
+library(metafor)
+p_load(tidyverse)
+```
+
+### Step by step suggestions
+
+Step 1: Perform a meta-analysis of pitch variability from previous studies of voice in ASD
+- the data is available as Ass4_MetaAnalysisData.tsv
+- You should calculate Effect size (cohen's d) and Standard Error (uncertainty in the Cohen's d) per each study, using escalc() from the metafor package (also check the livecoding intro)
+- N.B. we're only interested in getting a meta-analytic effect size for the meta-analytic prior (and not e.g. all the stuff on publication bias). See a brms tutorial here: https://vuorre.netlify.com/post/2016/09/29/meta-analysis-is-a-special-case-of-bayesian-multilevel-modeling/ The formula is EffectSize | se(StandardError) ~ 1 + (1 | Paper). Don't forget prior definition, model checking, etc.
+```{r Meta-analysis}
+# We set a seed
+set.seed(3)
+# Read the data
+m <- read_tsv("Ass4_MetaAnalysisData.tsv")
+
+
+# We subset NAs
+m <- m %>% subset(!is.na(Paper))
+
+# We will calculate Effect sizes
+PitchMeanES <- escalc('SMD',
+  n1i = TD_N, n2i = ASD_N, 
+  m1i = PitchVariabilityTD_Mean, m2i = PitchVariabilityASD_Mean,                     
+  sd1i = PitchVariabilityTD_SD, sd2i = PitchVariabilityASD_SD,  
+  data = m, 
+  slab = Paper)
+
+# We calculate the stanard error
+PitchMeanES <- PitchMeanES %>% mutate(
+  sei = sqrt(PitchMeanES$vi)
+  )
+
+#vi is a measure of uncertainty (sd^2) variance
+#yi is the mean estimated cohen's d wihtin study = effect size
+
+# We plot the studies
+library(ggplot2)
+ggplot(PitchMeanES, aes(x=yi, y=Paper)) +
+  geom_segment(aes(x = yi-sei*2, xend = yi+sei*2, y=Paper, yend=Paper)) +
+  geom_point()
+
+# We define the formula
+MA_f <- bf(
+  yi | se(sei) ~ 1 + (1 | Population) # We say the outcome measure should not be taken at face value but we expect it to vary
+)
+get_prior(MA_f, family = gaussian, data = PitchMeanES)
+
+MA_prior <- c(
+  prior(normal(0, 1), class = Intercept), # # what is my prior for the meta-analytical effect size - being sceptical putting the mean to zero
+  prior(normal(0, .3), class = sd) # variabiity is likely to be up to .6 but we expect it around .3
+)
+
+Prior_check <- brm(
+  formula = MA_f, 
+  prior = MA_prior,
+  family = gaussian(),
+  data = PitchMeanES, 
+  sample_prior = "only", 
+  chains = 2, 
+  core = 2,
+  file = "Prior_check_2"
+)
+summary(Prior_check)
+
+#Prior predictive check
+pp_check(Prior_check, nsamples = 100)
+
+MA_m1 <- brm(
+  formula = MA_f, 
+  prior = MA_prior,
+  family = gaussian(),
+  data = PitchMeanES, 
+  sample_prior = T, 
+  chains = 2, 
+  core = 2,
+  file = "MA_m1_2"
+)
+#Posterior predictive check
+pp_check(MA_m1, nsamples = 100)
+
+summary(MA_m1)
+
+# MetaAnalysis effect mean = 0.44, sd = 0.01
+
+MA_mean <- fixef(MA_m1)[[1]]
+
+MA_se <- fixef(MA_m1)[[2]]
+
+MA_hetero <- 0.32
+```
+- Write down the results of the meta-analysis in terms of a prior for step 2.
+
+Step 2: Analyse pitch variability in ASD in two new studies for which you have access to all the trials (not just study level estimates)
+- the data is available as Ass4_data.csv. Notice there are 2 studies (language us, and language dk), multiple trials per participant, and a few different ways to measure pitch variability (if in doubt, focus on pitch IQR, interquartile range of the log of fundamental frequency)
+- Also, let's standardize the data, so that they are compatible with our meta-analytic prior (Cohen's d is measured in SDs).
+- Is there any structure in the dataset that we should account for with random/varying effects? How would you implement that? Or, if you don't know how to do bayesian random/varying effects or don't want to bother, is there anything we would need to simplify in the dataset?
+
+```{r Preperation of Analysis of pitch variability}
+# We get the data
+d <- read_csv("Ass4_data.csv", col_types = cols(ID=col_character()))
+
+# We scale the variable we will need
+d <- d %>% mutate(
+  PitchVariability = scale(Pitch_IQR)
+)
+
+# Language = fixed effect
+# ID --> varying effect
+```
+
+Step 3: Build a regression model predicting Pitch variability from Diagnosis.
+- how is the outcome distributed? (likelihood function). NB. given we are standardizing, and the meta-analysis is on that scale, gaussian is not a bad assumption. Lognormal would require us to convert the prior to that scale.
+We expect it to be Gaussian. 
+- how are the parameters of the likelihood distribution distributed? 
+Which predictors should they be conditioned on? Start simple, with Diagnosis only. Add other predictors only if you have the time and energy!
+- use a skeptical/conservative prior for the effects of diagnosis. Remember you'll need to motivate it.
+- Evaluate model quality. Describe and plot the estimates.
+```{r Regression model}
+# We look at the distribution of the Pitch Variability data
+hist(d$PitchVariability)
+# It looks close to a gaussian distribution
+# We wil start making a model with diagnosis
+pv_f1 <- bf(PitchVariability ~ 1 + Diagnosis + (1|ID))
+pv_f2 <- bf(PitchVariability ~ 0 + Language + Language:Diagnosis + (1|ID)) # The : better reflects what we know about the expected difference for diagnosis
+
+# We look at default priors
+get_prior(pv_f1, family = gaussian, d)
+# sd prior is the random variation
+# sigma is the errror we whould expect the model makes
+
+# We look at ASD as these are the intercept
+ASD <- d%>% dplyr::filter(Diagnosis == "ASD")
+summary(ASD$PitchVariability)
+
+TD <- d%>% dplyr::filter(Diagnosis == "TD")
+summary(TD$PitchVariability)
+
+# We make our own priors
+prior_pv <- c(
+  prior(normal(0, .1), class = Intercept), 
+  # What should we expect as the average pitch variability for the ASDs. We expect a 0 difference. 
+  prior(normal(0, .1), class = b), 
+  # The effect is probably small in these studies
+  prior(normal(0, .1), class = sd), 
+  # shrink them towards the mean
+  prior(normal(.5, .3), class = sigma) ) 
+# We make a sceptical sigma with an error up to 5. 
+#RF: Check sd(pitchvariability) = 1 and then makes (.1, .3) 
+
+
+prior_pv_PriorCheck <- brm(
+  formula = pv_f1,
+  data = d,
+  family = gaussian,
+  prior = prior_pv,
+  sample_prior = "only", #Only looks at priors
+  chains = 2,
+  cores = 2,
+  file = "prior_pv_check"
+)
+
+#dev.off() #This function worked when I got a pallette bug
+#Prior predictive check
+pp_check(prior_pv_PriorCheck, nsamples = 100) # Are the generated values in the right magnitude?
+
+
+## Fitting the model
+pv_m <- brm(
+  formula = pv_f1,
+  data = d,
+  family = gaussian,
+  prior = prior_pv,
+  sample_prior = T, 
+  chains = 2,
+  cores = 2,
+  file = "pv_m"
+)
+
+pp_check(pv_m, nsamples = 100)
+
+summary(pv_m)
+
+
+# Then it all again with the interaction of language
+
+# We look at default priors
+get_prior(pv_f2, family = gaussian, d)
+
+# We define priors
+NS_prior1 <- c(
+  prior(normal(0, .1), class = b, coef = "Languagedk"),
+  prior(normal(0, .1), class = b, coef = "Languageus"),
+  prior(normal(0, .1), class = b, coef = "Languagedk:DiagnosisTD"),
+  prior(normal(0, .1), class = b, coef = "Languageus:DiagnosisTD"),
+  prior(normal(0, .1), class = sd),
+  prior(normal(.5, .1), class = sigma)
+)
+
+# Fit prior model
+pv_m2_prior <- brm(
+  formula = pv_f2,
+  data = d,
+  family = gaussian,
+  prior = NS_prior1,
+  sample_prior = "only", 
+  chains = 2,
+  cores = 2,
+  file = "pv_m2_prior"
+)
+
+#Prior predictive check
+pp_check(pv_m2_prior, nsamples = 100) # Are the generated values in the right magnitude?
+
+
+## Fitting the model
+pv_m2 <- brm(
+  formula = pv_f2,
+  data = d,
+  family = gaussian,
+  prior = NS_prior1,
+  sample_prior = T,
+  chains = 2,
+  cores = 2,
+  file = "pv_m2"
+)
+
+# posterior predictive check
+pp_check(pv_m2, nsamples = 100)
+
+
+# For the first model
+summary(pv_m)
+
+plot(hypothesis(pv_m, "DiagnosisTD < 0"))
+hypothesis(pv_m, "DiagnosisTD < 0")
+
+## For the second model
+summary(pv_m2)
+
+plot(hypothesis(pv_m2, "Languagedk:DiagnosisTD < 0"))
+plot(hypothesis(pv_m2, "Languageus:DiagnosisTD < 0"))
+
+hypothesis(pv_m2, "Languagedk:DiagnosisTD < 0")
+hypothesis(pv_m2, "Languageus:DiagnosisTD < 0")
+
+plot(hypothesis(pv_m2, "Languagedk:DiagnosisTD < Languageus:DiagnosisTD"))
+hypothesis(pv_m2, "Languagedk:DiagnosisTD < Languageus:DiagnosisTD")
+
+
+# We add criterion
+pv_m <- add_criterion(pv_m, criterion = "loo", reloo = T)
+pv_m2 <- add_criterion(pv_m2, criterion = "loo", reloo=T)
+
+loo_model_weights(pv_m, pv_m2)
+
+stanplot(pv_m)
+
+plot(conditional_effects(pv_m2))
+
+```
+
+Step 4: Now re-run the model with the meta-analytic prior
+- Evaluate model quality. Describe and plot the estimates. 
+```{r Re-run model with meta-analytic prior}
+# get the estimates from the conservative model
+MA_mean <- fixef(MA_m1)[[1]]
+MA_se <- fixef(MA_m1)[[2]]
+
+MA_heterogeneity <- 0.32
+
+# define priors
+m2_prior <- c(
+  prior(normal(.2, .3), class = b, coef = "Languagedk"),
+  prior(normal(.2, .3), class = b, coef = "Languageus"),
+  prior(normal(-.44, .1), class = b, coef = "Languagedk:DiagnosisTD"),
+  prior(normal(-.44, .1), class = b, coef = "Languageus:DiagnosisTD"),
+  prior(normal(0, .1), class = sd), 
+  prior(normal(.32, .1), class = sigma) 
+) 
+
+# fit prior model
+informed_prior_m <- brm(
+  formula = pv_f2,
+  data = d,
+  family = gaussian,
+  prior = m2_prior,
+  sample_prior = "only", 
+  chains = 2,
+  cores = 2,
+  file = "informed_prior_m"
+)
+pp_check(informed_prior_m , nsamples = 100)
+
+# fit model
+m2 <- brm(
+  formula = pv_f2,
+  data = d,
+  family = gaussian,
+  prior = m2_prior,
+  sample_prior = T, 
+  chains = 2,
+  cores = 2,
+  file = "m2"
+)
+pp_check(m2, nsamples = 100)
+# almost perfect
+
+summary(m2)
+
+
+```
+
+
+Step 5: Compare the models
+- Plot priors and posteriors of the diagnosis effect in both models
+- Compare posteriors between the two models
+- Compare the two models (LOO)
+- Discuss how they compare and whether any of them is best.
+
+```{r Compare the models}
+
+plot(hypothesis(m2, "Languagedk:DiagnosisTD < 0"))
+plot(hypothesis(m2, "Languageus:DiagnosisTD < 0"))
+
+hypothesis(m2, "Languagedk:DiagnosisTD < 0")
+hypothesis(m2, "Languageus:DiagnosisTD < 0")
+
+plot(hypothesis(m2, "Languagedk:DiagnosisTD < Languageus:DiagnosisTD"))
+hypothesis(m2, "Languagedk:DiagnosisTD < Languageus:DiagnosisTD")
+# the prior is centered at zero while the posterior estimate is in the negative, so it is telling us that the effect in Danish is much smaller than the effect in American English. 
+
+
+# We add criterion
+# m2 is the model with the prior from the meta-analysis
+# pv_m2 is the model with the conservative prior
+m2 <- add_criterion(m2, criterion = "loo", reloo = T)
+
+pv_m2 <- add_criterion(pv_m2, criterion = "loo", reloo = T)
+
+loo_model_weights(pv_m2, m2)
+
+loo_compare(pv_m2, m2)
+
+plot(conditional_effects(m2))
+
+
+
+```
+
+Step 6: Prepare a nice write up of the analysis and answer the questions at the top.
+
+Optional step 7: how skeptical should a prior be?
+- Try different levels of skepticism and compare them using LOO.
+
+Optional step 8: Include other predictors
+- Do age, gender and education improve the model?
+- Should they be main effects or interactions?
